@@ -1,6 +1,7 @@
 
 
 import json
+import base64
 
 def generate_structure(path,rules, structure=None):
 	levels = path.split('.')
@@ -105,7 +106,6 @@ def clean_data(variable, schema):
 			variable[item] = clean_data(variable[item], schema[item])
 
 	for key in keys_to_delete:
-		print("delete: " + key)
 		del variable[key]
 
 	return variable
@@ -162,8 +162,6 @@ class InputRules:
 		return jsontools.convertToJson(self.__data_struct)
 	
 	def verify(self):
-		#print(jsontools.convertToJson(self.__data_struct))
-		#print(jsontools.convertToJson(self.__data))
 
 		if self.__options is not None:
 			self.__errors = validate_schema(self.__data,self.__data_struct,options=self.__options_struct)
@@ -172,11 +170,7 @@ class InputRules:
 
 		#Limpiar self.__data de valores que no esten en el schema
 		self.__data = clean_data(self.__data,self.__data_struct)
-
-		print("data...")
-		print(jsontools.convertToJson(self.__data))
-		print("data...")
-		
+	
 		if len(self.__errors)>0:
 			return False
 		else:
@@ -575,7 +569,7 @@ class jsontools:
 		try:
 			json.loads(data)
 		except ValueError as err:
-			print(err)
+			#print(err)
 			return False
 		return True
 
