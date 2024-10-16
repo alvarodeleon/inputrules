@@ -1,4 +1,4 @@
-# InputRules
+# InputRules - Input Rules Library
 
 ---
 
