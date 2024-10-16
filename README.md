@@ -1,4 +1,6 @@
-# InputRules - Input Rules Library
+# InputRules - Input Rules Library 
+
+Is an Alpha version, develop in progress, do not use it in production
 
 ---
 
