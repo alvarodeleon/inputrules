@@ -1,7 +1,13 @@
 
 
+import hashlib
+import html
 import json
 import base64
+import pickle
+import re
+import urllib
+import urllib.parse
 
 def generate_structure(path,rules, structure=None):
 	levels = path.split('.')
@@ -67,10 +73,16 @@ def validate_schema(variable, schema,messages=None,options=None):
 					messages.append('{} is required'.format(item))
 			
 		elif isinstance(schema[item],dict):
-			if options is not None and item in options:
-				messages = validate_schema(variable[item],schema[item],messages,options=options[item])
-			else:
-				messages = validate_schema(variable[item],schema[item],messages)
+			if item in variable and isinstance(variable[item], dict):
+				if options is not None and item in options:
+					messages = validate_schema(variable[item],schema[item],messages,options=options[item])
+				else:
+					messages = validate_schema(variable[item],schema[item],messages)
+			elif item not in variable:
+				# Check if any field in the nested schema is required
+				nested_required = any(isinstance(v, str) and 'required' in v for v in schema[item].values() if isinstance(v, str))
+				if nested_required:
+					messages.append('{} is required'.format(item))
 
 	return messages
 
@@ -111,40 +123,44 @@ def clean_data(variable, schema):
 	return variable
 
 
-def getValue(path,schema,absolute=''):
+def getValue(path, schema, absolute=''):
 	levels = path.split('.')
 
-	if absolute=='':
+	if absolute == '':
 		absolute = schema
 
-	for i, level in enumerate(levels):
-		if i == len(levels) - 1:
-			return absolute[level]
-		else:
-			if level not in absolute:
-				return False
-			absolute = absolute[level]
+	try:
+		for i, level in enumerate(levels):
+			if i == len(levels) - 1:
+				if level in absolute:
+					return absolute[level]
+				else:
+					return None
+			else:
+				if level not in absolute:
+					return None
+				absolute = absolute[level]
+	except (KeyError, TypeError):
+		return None
 
-	return False
+	return None
 
 
 class InputRules:
 
-	__data_struct = None
-	__data_filters = None
-	__data = None
-	__errors = []
-	__options = {}
-	__options_struct = {}
-
 	def __init__(self,data):
 		self.__data = data
+		self.__data_struct = None
+		self.__data_filters = None
+		self.__errors = []
+		self.__options = {}
+		self.__options_struct = {}
 
 	def rules(self,field,rules,filters=None,options=None):
 
 		if options is not None:
 			self.__options[field] = options
-			self.__options_struct = map_options(field,options)
+			self.__options_struct = map_options(field,options,self.__options_struct)
 
 		self.__data_struct = generate_structure(field,rules,self.__data_struct)
 	
@@ -179,6 +195,7 @@ class InputRules:
 
 class check:
 
+	@staticmethod
 	def rules(value,rules):
 
 		rules_list = [
@@ -208,11 +225,17 @@ class check:
 			if rule not in rules_list:
 				raise ValueError('Rule {} not found'.format(rule))
 
+			if rule=='required':
+				# Check if value is present and not empty
+				if value is None or value == '' or (isinstance(value, str) and value.strip() == ''):
+					_check = False
+				continue
+
 			if rule=='uuid':
 				if not check.uuid(value):
 					_check= False
 
-			if rule=='required' or rule=='options':
+			if rule=='options':
 				continue
 
 			if rule=='empty':
@@ -262,23 +285,60 @@ class check:
 		return _check
 
 
+	@staticmethod
 	def sanitize_sql(user_input):
-		user_input = re.sub(r"[\'\";--]", "", user_input)
+		if user_input is None:
+			return ""
+		
+		# Convert to string if not already
+		user_input = str(user_input)
+		
+		# Remove SQL comment indicators
+		user_input = re.sub(r"--.*$", "", user_input, flags=re.MULTILINE)
+		user_input = re.sub(r"/\*.*?\*/", "", user_input, flags=re.DOTALL)
+		
+		# Remove dangerous SQL characters
+		user_input = re.sub(r"['\";]", "", user_input)
+		
+		# Remove multiple spaces and normalize whitespace
 		user_input = re.sub(r"\s+", " ", user_input)
+		
+		# Remove common SQL injection patterns
+		dangerous_patterns = [
+			r"\bDROP\s+TABLE\b",
+			r"\bDELETE\s+FROM\b",
+			r"\bINSERT\s+INTO\b",
+			r"\bUPDATE\s+.*\s+SET\b",
+			r"\bCREATE\s+TABLE\b",
+			r"\bALTER\s+TABLE\b",
+			r"\bTRUNCATE\s+TABLE\b",
+			r"\bEXEC\s*\(",
+			r"\bEXECUTE\s*\(",
+			r"\bUNION\s+SELECT\b",
+			r"\bOR\s+1\s*=\s*1\b",
+			r"\bAND\s+1\s*=\s*1\b"
+		]
+		
+		for pattern in dangerous_patterns:
+			user_input = re.sub(pattern, "", user_input, flags=re.IGNORECASE)
+		
 		return user_input.strip()
-
+	
+	@staticmethod
 	def notnone(value):
 		if value is None:
 			return False
 		else:
 			return True
 
+	@staticmethod
 	def none(value):
 		if value is None:
 			return True
 		else:
 			return False
 
+	@staticmethod
 	def uuid(value):
 		if re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", value):
 			return True
@@ -286,6 +346,7 @@ class check:
 			return False
 
 	#Arrays
+	@staticmethod
 	def options(value,options):
 		if value in options:
 			return True
@@ -293,11 +354,13 @@ class check:
 			return False
 
 	#Contents
+	@staticmethod
 	def domain(value):
 		return bool(re.match(r"^(?=.{1,255}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z]{2,})+$", value))
 
+	@staticmethod
 	def ip(value):
-		valid = bool(re.match("[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$",value))
+		valid = bool(re.match(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$',value))
 
 		if not valid:
 			return False
@@ -309,6 +372,7 @@ class check:
 
 		return True
 
+	@staticmethod
 	def mail(value):
 		# Improved regex for email validation
 		if re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", value):
@@ -318,51 +382,61 @@ class check:
 
 	'''
 	def filename(value):
-		return re.match("^[A-Za-z0-9\_\-\.]+$",value)
+		return re.match(r"^[A-Za-z0-9\_\-\.]+$",value)
 	'''
 
 	#States
-
+	@staticmethod
 	def empty(value):
-
 		if value is None:
 			return True
-
-		if value=='':
+		
+		if value == '':
 			return True
-
-		elif check.numeric(value):
-			value = filter(value,'int')
-			if value < 1:
-				return True
-			else:
-				return False
-		elif check.string(value):
-			if value=='':
-				return True
-			else:
-				return False
+		
+		# Handle collections (list, dict, tuple, set)
+		if isinstance(value, (list, dict, tuple, set)):
+			return len(value) == 0
+		
+		# Handle boolean explicitly (False is a valid value, not empty)
+		if isinstance(value, bool):
+			return False
+		
+		# Handle numeric values (0 and 0.0 are considered empty)
+		if check.numeric(value):
+			return value == 0 or value == 0.0
+		
+		# Handle strings (already checked for '' above)
+		if check.string(value):
+			return value.strip() == ''
+		
+		# For any other type, consider not empty
+		return False
 
 
 	#types
+	@staticmethod
 	def string(value):
 		if isinstance(value,str):
 			return True
 		else:
 			return False
 
+	@staticmethod
 	def integer(value):
 		if isinstance(value,int):
 			return True
 		else:
 			return False
 
+	@staticmethod
 	def float(value):
 		if isinstance(value,float):
 			return True
 		else:
 			return False
 
+	@staticmethod
 	def numeric(value):
 		if check.integer(value) or check.float(value):
 			return True
@@ -387,8 +461,6 @@ def filter(value,rules):
 		'ucfirst',
 		'ucwords',
 		'json',
-		'serialize',
-		'unserialize',
 		'urldecode',
 		'urlencode',
 		'htmlentities',
@@ -438,86 +510,78 @@ def filter(value,rules):
 			continue
 
 		if rule=='trim' or rule=='strip':
-			value = value.strip()
+			value = str(value).strip()
 			continue
 
 		if rule=='md5':
-			value = hashlib.md5(value.encode()).hexdigest()
+			value = hashlib.md5(str(value).encode()).hexdigest()
 			continue
 
 		if rule=='base64' or rule=='b64encode':
-			value = base64.b64encode(value.encode()).decode()
+			value = base64.b64encode(str(value).encode()).decode()
 			continue
 
 		if rule=='b64decode':
-			value = base64.b64decode(value).decode()
+			value = base64.b64decode(str(value)).decode()
 			continue
 
 		if rule=='lower':
-			value = value.lower()
+			value = str(value).lower()
 			continue
 
 		if rule=='upper':
-			value = value.upper()
+			value = str(value).upper()
 			continue
 
 		if rule=='ucfirst':
-			value = value.capitalize()
+			value = str(value).capitalize()
 			continue
 
 		if rule=='ucwords':
-			value = value.title()
+			value = str(value).title()
 			continue
 
 		if rule=='json':
 			value = json.dumps(value)
 			continue
 
-		if rule=='serialize':
-			value = pickle.dumps(value)
-			continue
-
-		if rule=='unserialize':
-			value = pickle.loads(value)
-			continue
-
 		if rule=='urldecode':
-			value = urllib.parse.unquote(value)
+			value = urllib.parse.unquote(str(value))
 			continue
 
 		if rule=='urlencode':
-			value = urllib.parse.quote(value)
+			value = urllib.parse.quote(str(value))
 			continue
 
 		if rule=='htmlentities':
-			value = html.escape(value)
+			value = html.escape(str(value))
 			continue
 
 		if rule=='htmlspecialchars':
-			value = html.escape(value)
+			value = html.escape(str(value))
 			continue
 
 		if rule=='striptags':
-			value = re.sub('<[^<]+?>', '', value)
+			value = re.sub('<[^<]+?>', '', str(value))
 			continue
 
 		if rule=='stripslashes':
-			value = value.replace('\\','')
+			value = str(value).replace('\\','')
 			continue
 
 		if rule=='addslashes':
-			value = value.replace('"','\\"')
+			value = str(value).replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
 			continue
 
 		if rule=='nl2br':
-			value = value.replace('\n','<br>')
+			value = str(value).replace('\n','<br>')
 			continue
 
 		if rule=='br2nl':
-			value = value.replace('<br>','\n')
+			value = str(value).replace('<br>','\n')
 			continue
 		if rule=='xss' or rule=="escape":
-			value = html.escape(value)
+			value = html.escape(str(value))
 			continue
 
 		if rule=='sql':
@@ -529,6 +593,7 @@ def filter(value,rules):
 
 class jsontools:
 
+	@staticmethod
 	def get(path,schema):
 		levels = path.split('.')
 
@@ -542,6 +607,7 @@ class jsontools:
 
 		raise ValueError('Path not found')
 				
+	@staticmethod
 	def get2(path,schema,absolute=''):
 		levels = path.split('.')
 
@@ -559,12 +625,14 @@ class jsontools:
 		return False
 				
 		
+	@staticmethod
 	def pretty(data):
 		try:
 			return json.dumps(json.loads(data),indent=1)
 		except:
 			return False
 
+	@staticmethod
 	def validate(data):
 		try:
 			json.loads(data)
@@ -573,12 +641,14 @@ class jsontools:
 			return False
 		return True
 
+	@staticmethod
 	def convertJsonToList(data):
 		try:
 			return json.loads(data)
 		except:
 			return False
 
+	@staticmethod
 	def convertToJson(data):
 
 		if isinstance(data,dict):
@@ -602,13 +672,15 @@ class jsontools:
 		except ValueError as err:
 			return False
 
+	@staticmethod
 	def open(filename):
 		f = open(filename,"r")
 		content = f.read()
 		f.close()
 		return jsontools.convertToJson(content)
 
+	@staticmethod
 	def save(content,filename):
 		f = open(filename, "w")
-		f.write(jsontools.pretty(content) +"\n")
+		f.write("{}\n".format(jsontools.pretty(content)))
 		f.close()
