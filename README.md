@@ -483,3 +483,7 @@ The `empty()` function now correctly handles all data types:
 
 
 This documentation provides a complete guide for using both `InputRules` and the `check` class, allowing you to validate and sanitize data robustly and securely.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](./LICENSE) file for details.
